@@ -10,6 +10,8 @@ set(PSYCLE_LOADER_SOURCES
     loader/loader_state.h
     loader/psycle_machine_loader.cpp
     loader/psycle_machine_loader.h
+    loader/windows_dependency_diagnostics.cpp
+    loader/windows_dependency_diagnostics.h
 )
 
 function(configure_psycle_plugin target)
