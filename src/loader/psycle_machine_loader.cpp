@@ -222,6 +222,22 @@ bool PsycleMachineLoader::load(
         unload();
         return false;
     }
+    if (module_->info->numParameters < 0 ||
+        static_cast<size_t>(module_->info->numParameters) >
+            kMaximumParameters ||
+        (module_->info->numParameters > 0 &&
+         !module_->info->Parameters)) {
+        lastError_ = "The Psycle machine has an invalid parameter table.";
+        unload();
+        return false;
+    }
+    for (int index = 0; index < module_->info->numParameters; ++index) {
+        if (!module_->info->Parameters[index]) {
+            lastError_ = "The Psycle machine has an invalid parameter entry.";
+            unload();
+            return false;
+        }
+    }
 
     module_->machine = module_->createMachine();
     if (!module_->machine) {
@@ -234,6 +250,12 @@ bool PsycleMachineLoader::load(
     callbacks_->setSampleRate(sampleRate);
     module_->machine->pCB = callbacks_.get();
     module_->machine->Init();
+    for (int index = 0; index < module_->info->numParameters; ++index) {
+        module_->machine->ParameterTweak(
+            index,
+            module_->info->Parameters[index]->DefValue
+        );
+    }
     loadedPath_ = path;
     loadedName_ = module_->info->Name ? module_->info->Name : "Psycle machine";
     return true;
