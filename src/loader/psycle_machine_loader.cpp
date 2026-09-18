@@ -1,6 +1,7 @@
 #include "psycle_machine_loader.h"
 
 #include "psycle_native_interface.h"
+#include "windows_dependency_diagnostics.h"
 
 #include <algorithm>
 #include <cstring>
@@ -162,17 +163,17 @@ bool PsycleMachineLoader::load(
         return false;
     }
 
-    module_->handle = LoadLibraryExW(
-        widePath.c_str(),
-        nullptr,
-        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
-            LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
+    DWORD errorCode = ERROR_SUCCESS;
+    std::string dependencyDiagnostic;
+    module_->handle = loadWindowsMachineModule(
+        widePath,
+        errorCode,
+        dependencyDiagnostic
     );
     if (!module_->handle) {
-        const DWORD errorCode = GetLastError();
         lastError_ = errorCode == ERROR_MOD_NOT_FOUND
             ? "Windows could not find a DLL required by this Psycle machine "
-              "(error 126). Keep the machine and its companion DLLs together."
+              "(error 126)." + dependencyDiagnostic
             : "Windows could not load the selected Psycle machine (error " +
                 std::to_string(errorCode) + ").";
         return false;
