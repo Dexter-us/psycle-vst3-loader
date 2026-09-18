@@ -162,11 +162,19 @@ bool PsycleMachineLoader::load(
         return false;
     }
 
-    module_->handle = LoadLibraryW(widePath.c_str());
+    module_->handle = LoadLibraryExW(
+        widePath.c_str(),
+        nullptr,
+        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+            LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
+    );
     if (!module_->handle) {
-        lastError_ =
-            "Windows could not load the selected Psycle machine (error " +
-            std::to_string(GetLastError()) + ").";
+        const DWORD errorCode = GetLastError();
+        lastError_ = errorCode == ERROR_MOD_NOT_FOUND
+            ? "Windows could not find a DLL required by this Psycle machine "
+              "(error 126). Keep the machine and its companion DLLs together."
+            : "Windows could not load the selected Psycle machine (error " +
+                std::to_string(errorCode) + ").";
         return false;
     }
 
