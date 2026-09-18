@@ -84,6 +84,8 @@ namespace {
 
 constexpr size_t kMaximumParameters = 64 * 1024;
 constexpr size_t kMaximumMachineDataBytes = 16 * 1024 * 1024;
+constexpr float kPsycleAudioRange = 32768.0f;
+constexpr int kPsycleNoteOff = psycle::plugin_interface::NOTE_MAX + 1;
 
 #if defined(_WIN32)
 template <typename Function>
@@ -367,22 +369,6 @@ void PsycleMachineLoader::process(
         return;
     }
 
-    for (uint32_t index = 0; index < eventCount; ++index) {
-        const auto& event = events[index];
-        const int midiType = event.type == 0 ? 0x90 : 0x80;
-        const int velocity = std::clamp(
-            static_cast<int>(event.velocity * 127.0f),
-            0,
-            127
-        );
-        const int value = (static_cast<int>(event.note) << 8) | velocity;
-        module_->machine->MidiEvent(
-            static_cast<int>(event.channel),
-            midiType,
-            value
-        );
-    }
-
     float* left = outputs[0];
     float* right = channels > 1 && outputs[1] ? outputs[1] : left;
     if (!left || !right) {
@@ -392,13 +378,18 @@ void PsycleMachineLoader::process(
 
     if (module_->effectMode) {
         if (inputs && inputs[0]) {
-            std::memmove(left, inputs[0], sizeof(float) * frames);
+            for (uint32_t sample = 0; sample < frames; ++sample) {
+                left[sample] = inputs[0][sample] * kPsycleAudioRange;
+            }
         } else {
             std::fill(left, left + frames, 0.0f);
         }
         if (right != left) {
             if (inputs && inputs[1]) {
-                std::memmove(right, inputs[1], sizeof(float) * frames);
+                for (uint32_t sample = 0; sample < frames; ++sample) {
+                    right[sample] =
+                        inputs[1][sample] * kPsycleAudioRange;
+                }
             } else {
                 std::fill(right, right + frames, 0.0f);
             }
@@ -410,7 +401,56 @@ void PsycleMachineLoader::process(
         }
     }
 
-    module_->machine->Work(left, right, static_cast<int>(frames), 0);
+    uint32_t cursor = 0;
+    uint32_t eventIndex = 0;
+    while (eventIndex < eventCount) {
+        const uint32_t eventOffset = std::min(
+            events[eventIndex].sampleOffset,
+            frames
+        );
+        if (eventOffset > cursor) {
+            module_->machine->Work(
+                left + cursor,
+                right + cursor,
+                static_cast<int>(eventOffset - cursor),
+                16
+            );
+            cursor = eventOffset;
+        }
+
+        do {
+            const auto& event = events[eventIndex];
+            module_->machine->SeqTick(
+                static_cast<int>(event.channel),
+                event.type == 0
+                    ? static_cast<int>(event.note)
+                    : kPsycleNoteOff,
+                0,
+                0,
+                0
+            );
+            ++eventIndex;
+        } while (
+            eventIndex < eventCount &&
+            std::min(events[eventIndex].sampleOffset, frames) == eventOffset
+        );
+    }
+    if (cursor < frames) {
+        module_->machine->Work(
+            left + cursor,
+            right + cursor,
+            static_cast<int>(frames - cursor),
+            16
+        );
+    }
+
+    const float vstScale = 1.0f / kPsycleAudioRange;
+    for (uint32_t sample = 0; sample < frames; ++sample) {
+        left[sample] *= vstScale;
+        if (right != left) {
+            right[sample] *= vstScale;
+        }
+    }
 
     for (uint32_t channel = 2; channel < channels; ++channel) {
         if (outputs[channel]) {

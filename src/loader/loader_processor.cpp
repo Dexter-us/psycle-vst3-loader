@@ -27,8 +27,12 @@ FUnknown* createForRole(LoaderRole role) {
 }
 
 void clearBuffers(ProcessData& data) {
-    for (int32 channel = 0; channel < data.outputs->numChannels; ++channel) {
-        auto* buffer = data.outputs->channelBuffers32[channel];
+    if (!data.outputs || data.numOutputs <= 0) {
+        return;
+    }
+    auto& outputBus = data.outputs[0];
+    for (int32 channel = 0; channel < outputBus.numChannels; ++channel) {
+        auto* buffer = outputBus.channelBuffers32[channel];
         if (buffer) {
             std::fill(buffer, buffer + data.numSamples, 0.0f);
         }
@@ -83,6 +87,35 @@ tresult PLUGIN_API LoaderProcessor::setupProcessing(ProcessSetup& setup) {
     return AudioEffect::setupProcessing(setup);
 }
 
+tresult PLUGIN_API LoaderProcessor::setBusArrangements(
+    SpeakerArrangement* inputs,
+    int32 numIns,
+    SpeakerArrangement* outputs,
+    int32 numOuts
+) {
+    const bool stereoOutput =
+        outputs && numOuts == 1 && outputs[0] == SpeakerArr::kStereo;
+    const bool valid = role_ == LoaderRole::Effect
+        ? inputs && numIns == 1 &&
+              inputs[0] == SpeakerArr::kStereo && stereoOutput
+        : numIns == 0 && stereoOutput;
+    if (!valid) {
+        return kResultFalse;
+    }
+    return AudioEffect::setBusArrangements(
+        inputs,
+        numIns,
+        outputs,
+        numOuts
+    );
+}
+
+tresult PLUGIN_API LoaderProcessor::canProcessSampleSize(
+    int32 symbolicSampleSize
+) {
+    return symbolicSampleSize == kSample32 ? kResultTrue : kResultFalse;
+}
+
 tresult PLUGIN_API LoaderProcessor::setActive(TBool state) {
     active_.store(state != 0);
     if (state) {
@@ -94,12 +127,15 @@ tresult PLUGIN_API LoaderProcessor::setActive(TBool state) {
 }
 
 tresult PLUGIN_API LoaderProcessor::process(ProcessData& data) {
-    if (!data.outputs || data.numSamples <= 0) {
+    if (!data.outputs || data.numOutputs <= 0 || data.numSamples <= 0) {
         return kResultOk;
     }
 
     if (data.symbolicSampleSize == kSample32) {
-        const uint32_t channels = static_cast<uint32_t>(data.outputs->numChannels);
+        auto& outputBus = data.outputs[0];
+        const uint32_t channels = static_cast<uint32_t>(
+            std::max(0, outputBus.numChannels)
+        );
         std::array<const float*, 16> inputs {};
         if (data.inputs && data.numInputs > 0) {
             const auto& inputBus = data.inputs[0];
@@ -144,6 +180,24 @@ tresult PLUGIN_API LoaderProcessor::process(ProcessData& data) {
                 }
             }
         }
+        for (uint32_t index = 0; index < eventCount; ++index) {
+            events[index].sampleOffset = std::min(
+                events[index].sampleOffset,
+                static_cast<uint32_t>(data.numSamples)
+            );
+        }
+        for (uint32_t index = 1; index < eventCount; ++index) {
+            auto event = events[index];
+            uint32_t insertion = index;
+            while (
+                insertion > 0 &&
+                events[insertion - 1].sampleOffset > event.sampleOffset
+            ) {
+                events[insertion] = events[insertion - 1];
+                --insertion;
+            }
+            events[insertion] = event;
+        }
 
         if (data.inputParameterChanges) {
             const int32 parameterCount = data.inputParameterChanges->getParameterCount();
@@ -177,7 +231,7 @@ tresult PLUGIN_API LoaderProcessor::process(ProcessData& data) {
         if (machine) {
             machine->process(
                 inputs.data(),
-                data.outputs->channelBuffers32,
+                outputBus.channelBuffers32,
                 channels,
                 static_cast<uint32_t>(data.numSamples),
                 events.data(),
@@ -192,8 +246,8 @@ tresult PLUGIN_API LoaderProcessor::process(ProcessData& data) {
             std::memory_order_relaxed
         );
         if (outputGain != 1.0f) {
-            for (int32 channel = 0; channel < data.outputs->numChannels; ++channel) {
-                auto* buffer = data.outputs->channelBuffers32[channel];
+            for (int32 channel = 0; channel < outputBus.numChannels; ++channel) {
+                auto* buffer = outputBus.channelBuffers32[channel];
                 if (!buffer) {
                     continue;
                 }
