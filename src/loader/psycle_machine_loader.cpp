@@ -309,6 +309,36 @@ const std::string& PsycleMachineLoader::lastError() const noexcept {
     return lastError_;
 }
 
+void PsycleMachineLoader::setGeneration(uint64_t generation) noexcept {
+    generation_ = generation;
+}
+
+uint64_t PsycleMachineLoader::generation() const noexcept {
+    return generation_;
+}
+
+bool PsycleMachineLoader::parameterSnapshot(
+    std::vector<MachineParameterSnapshot>& result
+) const {
+    result.clear();
+    if (!module_ || !module_->info || !module_->machine ||
+        module_->info->numParameters < 0 ||
+        static_cast<size_t>(module_->info->numParameters) > kMaximumParameters) {
+        return false;
+    }
+    for (int index = 0; index < module_->info->numParameters; ++index) {
+        const auto* parameter = module_->info->Parameters[index];
+        if (!parameter) return false;
+        result.push_back({
+            parameter->Name ? parameter->Name : "Parameter",
+            parameter->Description ? parameter->Description : "",
+            parameter->MinValue, parameter->MaxValue,
+            module_->machine->Vals ? module_->machine->Vals[index] : parameter->DefValue
+        });
+    }
+    return true;
+}
+
 bool PsycleMachineLoader::captureState(
     std::vector<int32_t>& parameters,
     std::vector<uint8_t>& data
@@ -371,11 +401,25 @@ bool PsycleMachineLoader::restoreState(
         );
     }
     if (!data.empty()) {
+        const int expectedDataSize = module_->machine->GetDataSize();
+        if (expectedDataSize < 0 ||
+            static_cast<size_t>(expectedDataSize) != data.size()) {
+            return false;
+        }
         module_->machine->PutData(
             const_cast<uint8_t*>(data.data())
         );
     }
     return true;
+}
+
+void PsycleMachineLoader::applyParameter(int32_t index, int32_t value) noexcept {
+    if (!module_ || !module_->machine || !module_->info ||
+        index < 0 || index >= module_->info->numParameters ||
+        !module_->info->Parameters[index]) return;
+    const auto* parameter = module_->info->Parameters[index];
+    module_->machine->ParameterTweak(
+        index, std::clamp(value, parameter->MinValue, parameter->MaxValue));
 }
 
 void PsycleMachineLoader::process(

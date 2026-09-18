@@ -4,6 +4,7 @@
 
 #include "public.sdk/source/vst/vstaudioeffect.h"
 
+#include <array>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -64,10 +65,21 @@ private:
     std::string nativeStatePath_;
     std::vector<int32_t> savedMachineParameters_;
     std::vector<uint8_t> savedMachineData_;
+    struct PendingTweak { uint64_t generation; int32_t index; int32_t value; };
+    static constexpr uint32_t kTweakQueueCapacity = 1024;
+    std::array<PendingTweak, kTweakQueueCapacity> pendingTweaks_ {};
+    std::atomic<uint32_t> tweakWriteIndex_ {0};
+    std::atomic<uint32_t> tweakReadIndex_ {0};
+    std::atomic<uint64_t> machineGeneration_ {0};
 
     void loadSelectedMachine();
     bool loadMachinePath(const std::string& path);
     void sendMachineStatus(bool success, const std::string& status);
+    void sendMachineParameters(
+        const std::vector<MachineParameterSnapshot>& parameters,
+        uint64_t generation
+    );
+    void applyPendingTweaks(PsycleMachineLoader& machine) noexcept;
     PsycleMachineLoader* acquireMachineForAudio() noexcept;
     void releaseMachineFromAudio() noexcept;
     void reclaimRetiredMachines();

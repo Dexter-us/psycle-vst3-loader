@@ -16,6 +16,14 @@ struct MachineEvent {
     float tuning;
 };
 
+struct MachineParameterSnapshot {
+    std::string name;
+    std::string description;
+    int32_t minimum = 0;
+    int32_t maximum = 0;
+    int32_t value = 0;
+};
+
 class PsycleMachineLoader final {
 public:
     PsycleMachineLoader();
@@ -30,6 +38,9 @@ public:
     const std::string& loadedPath() const noexcept;
     const std::string& loadedName() const noexcept;
     const std::string& lastError() const noexcept;
+    void setGeneration(uint64_t generation) noexcept;
+    uint64_t generation() const noexcept;
+    bool parameterSnapshot(std::vector<MachineParameterSnapshot>& result) const;
     bool captureState(
         std::vector<int32_t>& parameters,
         std::vector<uint8_t>& data
@@ -47,6 +58,7 @@ public:
         const MachineEvent* events,
         uint32_t eventCount
     ) noexcept;
+    void applyParameter(int32_t index, int32_t value) noexcept;
 
 private:
     struct Module;
@@ -56,6 +68,7 @@ private:
     std::string loadedPath_;
     std::string loadedName_;
     std::string lastError_;
+    uint64_t generation_ = 0;
 };
 
 } // namespace psycle::loader

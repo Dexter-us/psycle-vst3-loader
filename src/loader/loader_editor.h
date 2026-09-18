@@ -1,17 +1,17 @@
 #pragma once
 
 #include "public.sdk/source/common/pluginview.h"
+#include "loader_controller.h"
 
 #include <mutex>
 #include <string>
+#include <vector>
 
 #if defined(_WIN32)
 #include <windows.h>
 #endif
 
 namespace psycle::loader {
-
-class LoaderController;
 
 class LoaderEditorView final : public Steinberg::CPluginView {
 public:
@@ -30,6 +30,7 @@ public:
 
     void updateMachinePath(const std::string& path);
     void updateStatus(const std::string& status, bool success);
+    void updateParameters(const std::vector<EditorParameter>& parameters);
 
 private:
 #if defined(_WIN32)
@@ -41,6 +42,7 @@ private:
     );
 
     void createControls();
+    void rebuildParameterControls();
     void chooseMachine();
     void layoutControls(int width, int height);
     void destroyControls();
@@ -51,12 +53,19 @@ private:
     HWND pathEdit_ = nullptr;
     HWND browseButton_ = nullptr;
     HWND status_ = nullptr;
+    std::vector<HWND> parameterLabels_;
+    std::vector<HWND> parameterEdits_;
+    std::vector<EditorParameter> parameters_;
+    int parameterScrollOffset_ = 0;
+    int currentHeight_ = 420;
     WNDPROC originalWindowProc_ = nullptr;
     std::mutex pendingUpdateMutex_;
     std::wstring pendingPath_;
     std::wstring pendingStatus_;
+    std::vector<EditorParameter> pendingParameters_;
     bool pathUpdatePending_ = false;
     bool statusUpdatePending_ = false;
+    bool parametersUpdatePending_ = false;
 #endif
 
     LoaderController& controller_;

@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <cstring>
 #include <thread>
 
 namespace psycle::loader {
@@ -21,6 +22,7 @@ using namespace Steinberg::Vst;
 namespace {
 
 constexpr char kMachinePathEnvironment[] = "PSYCLE_MACHINE_PATH";
+constexpr uint32_t kParameterMessageVersion = 1;
 
 FUnknown* createForRole(LoaderRole role) {
     return static_cast<IAudioProcessor*>(new LoaderProcessor(role));
@@ -229,6 +231,7 @@ tresult PLUGIN_API LoaderProcessor::process(ProcessData& data) {
 
         auto* machine = acquireMachineForAudio();
         if (machine) {
+            applyPendingTweaks(*machine);
             machine->process(
                 inputs.data(),
                 outputBus.channelBuffers32,
@@ -264,10 +267,42 @@ tresult PLUGIN_API LoaderProcessor::process(ProcessData& data) {
 }
 
 tresult PLUGIN_API LoaderProcessor::notify(IMessage* message) {
-    if (!message ||
-        !FIDStringsEqual(message->getMessageID(), kMachinePathMessageId)) {
+    if (!message) {
         return AudioEffect::notify(message);
     }
+    if (FIDStringsEqual(message->getMessageID(), kMachineTweakMessageId)) {
+        const void* raw = nullptr; uint32 size = 0;
+        auto* attrs = message->getAttributes();
+        if (!attrs || attrs->getBinary(kMachineTweakAttributeId, raw, size) != kResultOk ||
+            size != sizeof(uint64_t) + sizeof(int32_t) * 2) return kResultFalse;
+        const auto* bytes = static_cast<const uint8_t*>(raw);
+        uint64_t generation = 0; int32_t index = 0; int32_t value = 0;
+        std::memcpy(&generation, bytes, sizeof(generation));
+        std::memcpy(&index, bytes + sizeof(generation), sizeof(index));
+        std::memcpy(&value, bytes + sizeof(generation) + sizeof(index), sizeof(value));
+        std::lock_guard<std::mutex> lock(ownershipMutex_);
+        if (generation != machineGeneration_.load(std::memory_order_acquire)) {
+            return kResultFalse;
+        }
+        const auto writeIndex = tweakWriteIndex_.load(
+            std::memory_order_relaxed
+        );
+        const auto readIndex = tweakReadIndex_.load(
+            std::memory_order_acquire
+        );
+        if (writeIndex - readIndex >= kTweakQueueCapacity) {
+            return kResultFalse;
+        }
+        pendingTweaks_[writeIndex % kTweakQueueCapacity] = {
+            generation,
+            index,
+            value
+        };
+        tweakWriteIndex_.store(writeIndex + 1, std::memory_order_release);
+        return kResultOk;
+    }
+    if (!FIDStringsEqual(message->getMessageID(), kMachinePathMessageId))
+        return AudioEffect::notify(message);
 
     std::array<TChar, 4096> pathBuffer {};
     if (!message->getAttributes() ||
@@ -339,6 +374,7 @@ tresult PLUGIN_API LoaderProcessor::getState(IBStream* state) {
             ) {
                 std::this_thread::yield();
             }
+            applyPendingTweaks(*captureTarget);
 
             std::vector<int32_t> capturedParameters;
             std::vector<uint8_t> capturedData;
@@ -392,8 +428,11 @@ bool LoaderProcessor::loadMachinePath(const std::string& path) {
     }
 
     const std::string loadedName = replacement->loadedName();
+    std::vector<MachineParameterSnapshot> parameterSnapshot;
     bool stateRestored = true;
     bool deactivated = false;
+    bool parameterSnapshotFailed = false;
+    uint64_t publishedGeneration = 0;
     {
         std::lock_guard<std::mutex> lock(ownershipMutex_);
         if (path == nativeStatePath_ &&
@@ -412,16 +451,26 @@ bool LoaderProcessor::loadMachinePath(const std::string& path) {
         if (!active_.load()) {
             deactivated = true;
         } else {
-            if (machine_) {
-                retiredMachines_.push_back(std::move(machine_));
+            if (!replacement->parameterSnapshot(parameterSnapshot)) {
+                parameterSnapshotFailed = true;
+            } else {
+                if (machine_) {
+                    retiredMachines_.push_back(std::move(machine_));
+                }
+                publishedGeneration =
+                    machineGeneration_.fetch_add(
+                        1,
+                        std::memory_order_acq_rel
+                    ) + 1;
+                replacement->setGeneration(publishedGeneration);
+                machine_ = std::move(replacement);
+                machinePath_ = path;
+                publishedMachine_.store(
+                    machine_.get(),
+                    std::memory_order_seq_cst
+                );
+                reclaimRetiredMachines();
             }
-            machine_ = std::move(replacement);
-            machinePath_ = path;
-            publishedMachine_.store(
-                machine_.get(),
-                std::memory_order_seq_cst
-            );
-            reclaimRetiredMachines();
         }
     }
     if (deactivated) {
@@ -431,13 +480,76 @@ bool LoaderProcessor::loadMachinePath(const std::string& path) {
         );
         return false;
     }
+    if (parameterSnapshotFailed) {
+        sendMachineStatus(
+            false,
+            "The machine parameter table could not be read."
+        );
+        return false;
+    }
     sendMachineStatus(
         true,
         stateRestored
             ? loadedName
             : loadedName + " (saved machine data could not be restored)"
     );
+    sendMachineParameters(parameterSnapshot, publishedGeneration);
     return true;
+}
+
+void LoaderProcessor::sendMachineParameters(
+    const std::vector<MachineParameterSnapshot>& parameters,
+    uint64_t generation
+) {
+    std::vector<uint8_t> payload;
+    auto append = [&payload](const void* data, size_t size) {
+        const auto* bytes = static_cast<const uint8_t*>(data);
+        payload.insert(payload.end(), bytes, bytes + size);
+    };
+    const uint32_t version = kParameterMessageVersion;
+    const uint32_t count = static_cast<uint32_t>(
+        std::min<size_t>(parameters.size(), kMaximumEditorParameters)
+    );
+    append(&version, sizeof(version)); append(&generation, sizeof(generation));
+    append(&count, sizeof(count));
+    for (uint32_t index = 0; index < count; ++index) {
+        const auto& parameter = parameters[index];
+        const uint32_t nameSize = static_cast<uint32_t>(
+            std::min<size_t>(parameter.name.size(), 1024));
+        const uint32_t descriptionSize = static_cast<uint32_t>(
+            std::min<size_t>(parameter.description.size(), 1024));
+        append(&nameSize, sizeof(nameSize)); append(parameter.name.data(), nameSize);
+        append(&descriptionSize, sizeof(descriptionSize));
+        append(parameter.description.data(), descriptionSize);
+        append(&parameter.minimum, sizeof(parameter.minimum));
+        append(&parameter.maximum, sizeof(parameter.maximum));
+        append(&parameter.value, sizeof(parameter.value));
+    }
+    IMessage* message = allocateMessage();
+    if (!message) return;
+    message->setMessageID(kMachineParametersMessageId);
+    if (message->getAttributes()->setBinary(
+            kMachineParametersAttributeId, payload.data(),
+            static_cast<uint32>(payload.size())) == kResultOk) {
+        sendMessage(message);
+    }
+    message->release();
+}
+
+void LoaderProcessor::applyPendingTweaks(
+    PsycleMachineLoader& machine
+) noexcept {
+    auto readIndex = tweakReadIndex_.load(std::memory_order_relaxed);
+    const auto writeIndex = tweakWriteIndex_.load(std::memory_order_acquire);
+    while (readIndex != writeIndex) {
+        const auto& tweak =
+            pendingTweaks_[readIndex % kTweakQueueCapacity];
+        if (tweak.generation == machine.generation()) {
+            machine.applyParameter(tweak.index, tweak.value);
+        }
+        ++readIndex;
+    }
+    tweakReadIndex_.store(readIndex, std::memory_order_release);
 }
 
 void LoaderProcessor::sendMachineStatus(
