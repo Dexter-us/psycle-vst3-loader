@@ -34,6 +34,7 @@ constexpr int kMinimumHeight = 240;
 
 #if defined(_WIN32)
 constexpr int kBrowseButtonId = 1001;
+constexpr int kResizeButtonId = 1002;
 constexpr int kParameterControlBase = 2000;
 constexpr int kSliderControlBase = 3000;
 constexpr int kPanelTop = 164;
@@ -185,7 +186,7 @@ tresult PLUGIN_API LoaderEditorView::attached(void* parent, FIDString type) {
         0,
         L"STATIC",
         L"",
-        WS_CHILD | WS_VISIBLE | SS_NOTIFY,
+        WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | SS_NOTIFY,
         0,
         0,
         getRect().getWidth(),
@@ -213,6 +214,10 @@ tresult PLUGIN_API LoaderEditorView::attached(void* parent, FIDString type) {
     createControls();
     layoutControls(getRect().getWidth(), getRect().getHeight());
     controller_.registerEditor(this);
+    RedrawWindow(
+        container_, nullptr, nullptr,
+        RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW
+    );
 #endif
     return kResultOk;
 }
@@ -233,6 +238,10 @@ tresult PLUGIN_API LoaderEditorView::onSize(ViewRect* newSize) {
         const int height = std::max(1, newSize->getHeight());
         MoveWindow(container_, 0, 0, width, height, TRUE);
         layoutControls(width, height);
+        RedrawWindow(
+            container_, nullptr, nullptr,
+            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW
+        );
     }
 #endif
     return result;
@@ -371,7 +380,26 @@ LRESULT CALLBACK LoaderEditorView::windowProc(
             self->parameters_ = std::move(parameters);
             self->rebuildParameterControls();
         }
+        RedrawWindow(
+            self->container_, nullptr, nullptr,
+            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW
+        );
         return 0;
+    }
+
+    if (self && message == WM_PAINT) {
+        PAINTSTRUCT paint {};
+        HDC dc = BeginPaint(window, &paint);
+        FillRect(dc, &paint.rcPaint, GetSysColorBrush(COLOR_BTNFACE));
+        EndPaint(window, &paint);
+        return 0;
+    }
+    if (self && message == WM_ERASEBKGND) return 1;
+    if (self && message == WM_CTLCOLORSTATIC) {
+        auto dc = reinterpret_cast<HDC>(wParam);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, GetSysColor(COLOR_BTNTEXT));
+        return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_BTNFACE));
     }
 
     if (self && message == WM_MOUSEWHEEL && self->parameterPanel_) {
@@ -383,6 +411,12 @@ LRESULT CALLBACK LoaderEditorView::windowProc(
         LOWORD(wParam) == kBrowseButtonId &&
         HIWORD(wParam) == BN_CLICKED) {
         self->chooseMachine();
+        return 0;
+    }
+    if (self && message == WM_COMMAND &&
+        LOWORD(wParam) == kResizeButtonId &&
+        HIWORD(wParam) == BN_CLICKED) {
+        self->requestLargerView();
         return 0;
     }
     if (self && self->originalWindowProc_) {
@@ -413,6 +447,20 @@ LRESULT CALLBACK LoaderEditorView::parameterPanelProc(
         GetScrollInfo(window, SB_VERT, &info);
         self->scrollParameters(LOWORD(wParam), info.nTrackPos);
         return 0;
+    }
+    if (self && message == WM_PAINT) {
+        PAINTSTRUCT paint {};
+        HDC dc = BeginPaint(window, &paint);
+        FillRect(dc, &paint.rcPaint, GetSysColorBrush(COLOR_BTNFACE));
+        EndPaint(window, &paint);
+        return 0;
+    }
+    if (self && message == WM_ERASEBKGND) return 1;
+    if (self && message == WM_CTLCOLORSTATIC) {
+        auto dc = reinterpret_cast<HDC>(wParam);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, GetSysColor(COLOR_BTNTEXT));
+        return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_BTNFACE));
     }
     if (self && message == WM_MOUSEWHEEL) {
         self->wheelRemainder_ += GET_WHEEL_DELTA_WPARAM(wParam);
@@ -529,6 +577,13 @@ void LoaderEditorView::createControls() {
         GetModuleHandleW(nullptr),
         nullptr
     );
+    resizeButton_ = CreateWindowExW(
+        0, L"BUTTON", L"Larger view",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+        432, 12, 108, 27, container_,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kResizeButtonId)),
+        GetModuleHandleW(nullptr), nullptr
+    );
     status_ = CreateWindowExW(
         0,
         L"STATIC",
@@ -563,6 +618,7 @@ void LoaderEditorView::createControls() {
     applyDefaultFont(description_);
     applyDefaultFont(pathEdit_);
     applyDefaultFont(browseButton_);
+    applyDefaultFont(resizeButton_);
     applyDefaultFont(status_);
 
     const auto currentMachinePath = controller_.machinePath();
@@ -730,6 +786,19 @@ void LoaderEditorView::chooseMachine() {
     controller_.selectMachinePath(selectedPath);
 }
 
+void LoaderEditorView::requestLargerView() {
+    if (!plugFrame) {
+        SetWindowTextW(status_, L"This host does not offer plugin-window resizing. Use the parameter scrollbar.");
+        return;
+    }
+    const bool expanded = getRect().getWidth() >= 740 && getRect().getHeight() >= 580;
+    ViewRect requested(0, 0, expanded ? kEditorWidth : 760,
+                       expanded ? kEditorHeight : 600);
+    if (plugFrame->resizeView(this, &requested) != kResultTrue) {
+        SetWindowTextW(status_, L"MuseScore did not allow resizing. Use the parameter scrollbar.");
+    }
+}
+
 void LoaderEditorView::layoutControls(int width, int height) {
     currentHeight_ = height;
     const int contentWidth = std::max(220, width - 40);
@@ -745,7 +814,12 @@ void LoaderEditorView::layoutControls(int width, int height) {
         26,
         TRUE
     );
-    MoveWindow(title_, 20, 16, contentWidth, 22, TRUE);
+    MoveWindow(title_, 20, 16, std::max(1, contentWidth - 124), 22, TRUE);
+    MoveWindow(resizeButton_, std::max(20, width - 128), 12, 108, 27, TRUE);
+    SetWindowTextW(
+        resizeButton_,
+        width >= 740 && height >= 580 ? L"Smaller view" : L"Larger view"
+    );
     MoveWindow(description_, 20, 44, contentWidth, 20, TRUE);
     MoveWindow(status_, 20, 118, contentWidth, 36, TRUE);
     if (parameterPanel_) {
@@ -849,6 +923,7 @@ void LoaderEditorView::destroyControls() {
     description_ = nullptr;
     pathEdit_ = nullptr;
     browseButton_ = nullptr;
+    resizeButton_ = nullptr;
     status_ = nullptr;
     parameterLabels_.clear();
     parameterEdits_.clear();
