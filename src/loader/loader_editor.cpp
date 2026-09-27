@@ -35,6 +35,7 @@ constexpr int kMinimumHeight = 240;
 #if defined(_WIN32)
 constexpr int kBrowseButtonId = 1001;
 constexpr int kResizeButtonId = 1002;
+constexpr int kScrollbarControlId = 1003;
 constexpr int kParameterControlBase = 2000;
 constexpr int kSliderControlBase = 3000;
 constexpr int kPanelTop = 164;
@@ -406,6 +407,15 @@ LRESULT CALLBACK LoaderEditorView::windowProc(
         SendMessageW(self->parameterPanel_, message, wParam, lParam);
         return 0;
     }
+    if (self && message == WM_VSCROLL &&
+        reinterpret_cast<HWND>(lParam) == self->parameterScrollbar_) {
+        SCROLLINFO info {};
+        info.cbSize = sizeof(info);
+        info.fMask = SIF_TRACKPOS;
+        GetScrollInfo(self->parameterScrollbar_, SB_CTL, &info);
+        self->scrollParameters(LOWORD(wParam), info.nTrackPos);
+        return 0;
+    }
 
     if (self && message == WM_COMMAND &&
         LOWORD(wParam) == kBrowseButtonId &&
@@ -441,11 +451,7 @@ LRESULT CALLBACK LoaderEditorView::parameterPanelProc(
         GetWindowLongPtrW(window, GWLP_USERDATA)
     );
     if (self && message == WM_VSCROLL) {
-        SCROLLINFO info {};
-        info.cbSize = sizeof(info);
-        info.fMask = SIF_TRACKPOS;
-        GetScrollInfo(window, SB_VERT, &info);
-        self->scrollParameters(LOWORD(wParam), info.nTrackPos);
+        self->scrollParameters(LOWORD(wParam));
         return 0;
     }
     if (self && message == WM_PAINT) {
@@ -600,10 +606,24 @@ void LoaderEditorView::createControls() {
     );
     parameterPanel_ = CreateWindowExW(
         0, L"STATIC", L"",
-        WS_CHILD | WS_VISIBLE | SS_NOTIFY | WS_VSCROLL | WS_CLIPCHILDREN,
+        WS_CHILD | WS_VISIBLE | SS_NOTIFY | WS_CLIPCHILDREN,
         0, kPanelTop, kEditorWidth, kEditorHeight - kPanelTop,
         container_, nullptr, GetModuleHandleW(nullptr), nullptr
     );
+    parameterScrollbar_ = CreateWindowExW(
+        0, L"SCROLLBAR", L"",
+        WS_CHILD | SBS_VERT,
+        kEditorWidth - 30, kPanelTop, 18, kEditorHeight - kPanelTop,
+        container_,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kScrollbarControlId)),
+        GetModuleHandleW(nullptr), nullptr
+    );
+    if (parameterScrollbar_) {
+        SetWindowSubclass(
+            parameterScrollbar_, parameterChildProc, 1,
+            reinterpret_cast<DWORD_PTR>(this)
+        );
+    }
     if (parameterPanel_) {
         SetWindowLongPtrW(
             parameterPanel_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this)
@@ -698,6 +718,11 @@ void LoaderEditorView::rebuildParameterControls() {
         if (edit) {
             SetWindowSubclass(
                 edit, parameterChildProc, 1, reinterpret_cast<DWORD_PTR>(this)
+            );
+        }
+        if (label) {
+            SetWindowSubclass(
+                label, parameterChildProc, 1, reinterpret_cast<DWORD_PTR>(this)
             );
         }
         if (slider) {
@@ -824,9 +849,15 @@ void LoaderEditorView::layoutControls(int width, int height) {
     MoveWindow(status_, 20, 118, contentWidth, 36, TRUE);
     if (parameterPanel_) {
         MoveWindow(
-            parameterPanel_, 12, kPanelTop, std::max(1, width - 24),
+            parameterPanel_, 12, kPanelTop, std::max(1, width - 48),
             std::max(1, height - kPanelTop - 8), TRUE
         );
+        if (parameterScrollbar_) {
+            MoveWindow(
+                parameterScrollbar_, std::max(1, width - 32), kPanelTop,
+                18, std::max(1, height - kPanelTop - 8), TRUE
+            );
+        }
         layoutParameterPanel();
     }
 }
@@ -836,21 +867,25 @@ void LoaderEditorView::layoutParameterPanel() {
     RECT bounds {};
     GetClientRect(parameterPanel_, &bounds);
     const int height = std::max(1, static_cast<int>(bounds.bottom - bounds.top));
-    SCROLLINFO info {};
-    info.cbSize = sizeof(info);
-    info.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
-    info.nMin = 0;
-    info.nMax = std::max(
-        0, static_cast<int>(parameterLabels_.size()) * kParameterRowHeight - 1
+    const int contentHeight =
+        static_cast<int>(parameterLabels_.size()) * kParameterRowHeight;
+    parameterScrollOffset_ = std::clamp(
+        parameterScrollOffset_, 0, std::max(0, contentHeight - height)
     );
-    info.nPage = static_cast<UINT>(height);
-    info.nPos = parameterScrollOffset_;
-    SetScrollInfo(parameterPanel_, SB_VERT, &info, TRUE);
-    GetClientRect(parameterPanel_, &bounds);
+    if (parameterScrollbar_) {
+        SCROLLINFO info {};
+        info.cbSize = sizeof(info);
+        info.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+        info.nMin = 0;
+        info.nMax = std::max(0, contentHeight - 1);
+        info.nPage = static_cast<UINT>(height);
+        info.nPos = parameterScrollOffset_;
+        SetScrollInfo(parameterScrollbar_, SB_CTL, &info, TRUE);
+        ShowWindow(
+            parameterScrollbar_, contentHeight > height ? SW_SHOW : SW_HIDE
+        );
+    }
     const int width = static_cast<int>(bounds.right - bounds.left);
-    info.fMask = SIF_POS;
-    GetScrollInfo(parameterPanel_, SB_VERT, &info);
-    parameterScrollOffset_ = info.nPos;
     const int editWidth = 84;
     const int labelWidth = std::max(140, (width - editWidth - 24) * 45 / 100);
     const int sliderX = 8 + labelWidth + 8;
@@ -871,25 +906,25 @@ void LoaderEditorView::scrollParameters(
     int command, int trackPosition
 ) {
     if (!parameterPanel_) return;
-    SCROLLINFO info {};
-    info.cbSize = sizeof(info);
-    info.fMask = SIF_ALL;
-    GetScrollInfo(parameterPanel_, SB_VERT, &info);
-    int position = info.nPos;
+    RECT bounds {};
+    GetClientRect(parameterPanel_, &bounds);
+    const int height = std::max(1, static_cast<int>(bounds.bottom - bounds.top));
+    const int contentHeight =
+        static_cast<int>(parameterLabels_.size()) * kParameterRowHeight;
+    int position = parameterScrollOffset_;
     switch (command) {
     case SB_LINEUP: position -= kParameterRowHeight; break;
     case SB_LINEDOWN: position += kParameterRowHeight; break;
-    case SB_PAGEUP: position -= static_cast<int>(info.nPage); break;
-    case SB_PAGEDOWN: position += static_cast<int>(info.nPage); break;
+    case SB_PAGEUP: position -= height; break;
+    case SB_PAGEDOWN: position += height; break;
     case SB_THUMBPOSITION:
     case SB_THUMBTRACK: position = trackPosition; break;
-    case SB_TOP: position = info.nMin; break;
-    case SB_BOTTOM: position = info.nMax; break;
+    case SB_TOP: position = 0; break;
+    case SB_BOTTOM: position = contentHeight - height; break;
     default: return;
     }
     parameterScrollOffset_ = std::clamp(
-        position, 0,
-        std::max(0, info.nMax - static_cast<int>(info.nPage) + 1)
+        position, 0, std::max(0, contentHeight - height)
     );
     layoutParameterPanel();
 }
@@ -919,6 +954,7 @@ void LoaderEditorView::destroyControls() {
     DestroyWindow(container_);
     container_ = nullptr;
     parameterPanel_ = nullptr;
+    parameterScrollbar_ = nullptr;
     title_ = nullptr;
     description_ = nullptr;
     pathEdit_ = nullptr;
