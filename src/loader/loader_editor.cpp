@@ -6,13 +6,16 @@
 #include "pluginterfaces/gui/iplugview.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <cwchar>
+#include <limits>
 #include <utility>
 
 #if defined(_WIN32)
 #include <commdlg.h>
+#include <commctrl.h>
 #include <windowsx.h>
 #include <string_view>
 #include <vector>
@@ -26,11 +29,39 @@ namespace {
 
 constexpr int kEditorWidth = 560;
 constexpr int kEditorHeight = 420;
+constexpr int kMinimumWidth = 460;
+constexpr int kMinimumHeight = 240;
 
 #if defined(_WIN32)
 constexpr int kBrowseButtonId = 1001;
 constexpr int kParameterControlBase = 2000;
+constexpr int kSliderControlBase = 3000;
+constexpr int kPanelTop = 164;
+constexpr int kParameterRowHeight = 32;
+constexpr int kSliderSteps = 10000;
 constexpr UINT kUiUpdateMessage = WM_APP + 0x510;
+
+int sliderPosition(const EditorParameter& parameter) {
+    const auto span = static_cast<int64_t>(parameter.maximum) -
+                      parameter.minimum;
+    if (span <= 0) return 0;
+    const auto offset = static_cast<int64_t>(parameter.value) -
+                        parameter.minimum;
+    return static_cast<int>(
+        (offset * kSliderSteps + span / 2) / span
+    );
+}
+
+int32_t sliderValue(const EditorParameter& parameter, int position) {
+    const auto span = static_cast<int64_t>(parameter.maximum) -
+                      parameter.minimum;
+    return static_cast<int32_t>(
+        static_cast<int64_t>(parameter.minimum) +
+        (static_cast<int64_t>(std::clamp(position, 0, kSliderSteps)) *
+             span + kSliderSteps / 2) /
+            kSliderSteps
+    );
+}
 
 std::wstring utf8ToWide(const std::string& text) {
     if (text.empty()) {
@@ -143,15 +174,22 @@ tresult PLUGIN_API LoaderEditorView::attached(void* parent, FIDString type) {
     }
 
 #if defined(_WIN32)
+    INITCOMMONCONTROLSEX controls {};
+    controls.dwSize = sizeof(controls);
+    controls.dwICC = ICC_BAR_CLASSES;
+    if (!InitCommonControlsEx(&controls)) {
+        CPluginView::removed();
+        return kResultFalse;
+    }
     container_ = CreateWindowExW(
         0,
         L"STATIC",
         L"",
-        WS_CHILD | WS_VISIBLE | SS_NOTIFY | WS_VSCROLL,
+        WS_CHILD | WS_VISIBLE | SS_NOTIFY,
         0,
         0,
-        kEditorWidth,
-        kEditorHeight,
+        getRect().getWidth(),
+        getRect().getHeight(),
         static_cast<HWND>(parent),
         nullptr,
         GetModuleHandleW(nullptr),
@@ -173,6 +211,7 @@ tresult PLUGIN_API LoaderEditorView::attached(void* parent, FIDString type) {
         reinterpret_cast<LONG_PTR>(&LoaderEditorView::windowProc)
     ));
     createControls();
+    layoutControls(getRect().getWidth(), getRect().getHeight());
     controller_.registerEditor(this);
 #endif
     return kResultOk;
@@ -197,6 +236,39 @@ tresult PLUGIN_API LoaderEditorView::onSize(ViewRect* newSize) {
     }
 #endif
     return result;
+}
+
+tresult PLUGIN_API LoaderEditorView::onWheel(float distance) {
+#if defined(_WIN32)
+    if (parameterPanel_ && distance != 0.0f) {
+        hostWheelRemainder_ += std::clamp(distance, -32.0f, 32.0f);
+        while (hostWheelRemainder_ >= 1.0f) {
+            PostMessageW(parameterPanel_, WM_VSCROLL, SB_LINEUP, 0);
+            hostWheelRemainder_ -= 1.0f;
+        }
+        while (hostWheelRemainder_ <= -1.0f) {
+            PostMessageW(parameterPanel_, WM_VSCROLL, SB_LINEDOWN, 0);
+            hostWheelRemainder_ += 1.0f;
+        }
+        return kResultTrue;
+    }
+#else
+    (void)distance;
+#endif
+    return kResultFalse;
+}
+
+tresult PLUGIN_API LoaderEditorView::canResize() {
+    return kResultTrue;
+}
+
+tresult PLUGIN_API LoaderEditorView::checkSizeConstraint(ViewRect* rect) {
+    if (!rect) return kInvalidArgument;
+    rect->right = rect->left +
+        std::max(kMinimumWidth, rect->getWidth());
+    rect->bottom = rect->top +
+        std::max(kMinimumHeight, rect->getHeight());
+    return kResultTrue;
 }
 
 void LoaderEditorView::updateMachinePath(const std::string& path) {
@@ -302,43 +374,8 @@ LRESULT CALLBACK LoaderEditorView::windowProc(
         return 0;
     }
 
-    if (self && message == WM_VSCROLL) {
-        SCROLLINFO info {};
-        info.cbSize = sizeof(info);
-        info.fMask = SIF_ALL;
-        GetScrollInfo(window, SB_VERT, &info);
-        int position = info.nPos;
-        switch (LOWORD(wParam)) {
-        case SB_LINEUP: position -= 28; break;
-        case SB_LINEDOWN: position += 28; break;
-        case SB_PAGEUP: position -= static_cast<int>(info.nPage); break;
-        case SB_PAGEDOWN: position += static_cast<int>(info.nPage); break;
-        case SB_THUMBTRACK: position = info.nTrackPos; break;
-        default: return 0;
-        }
-        info.fMask = SIF_POS;
-        info.nPos = position;
-        SetScrollInfo(window, SB_VERT, &info, TRUE);
-        GetScrollInfo(window, SB_VERT, &info);
-        self->parameterScrollOffset_ = info.nPos;
-        RECT bounds {};
-        GetClientRect(window, &bounds);
-        self->layoutControls(
-            std::max(1, static_cast<int>(bounds.right - bounds.left)),
-            std::max(1, static_cast<int>(bounds.bottom - bounds.top))
-        );
-        return 0;
-    }
-    if (self && message == WM_MOUSEWHEEL) {
-        const int lines = GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA;
-        for (int index = 0; index < std::abs(lines); ++index) {
-            SendMessageW(
-                window,
-                WM_VSCROLL,
-                lines > 0 ? SB_LINEUP : SB_LINEDOWN,
-                0
-            );
-        }
+    if (self && message == WM_MOUSEWHEEL && self->parameterPanel_) {
+        SendMessageW(self->parameterPanel_, message, wParam, lParam);
         return 0;
     }
 
@@ -348,22 +385,6 @@ LRESULT CALLBACK LoaderEditorView::windowProc(
         self->chooseMachine();
         return 0;
     }
-    if (self && message == WM_COMMAND &&
-        HIWORD(wParam) == EN_KILLFOCUS &&
-        LOWORD(wParam) >= kParameterControlBase &&
-        LOWORD(wParam) < kParameterControlBase + 256) {
-        const size_t index = LOWORD(wParam) - kParameterControlBase;
-        if (index < self->parameters_.size()) {
-            wchar_t text[64] {};
-            GetWindowTextW(reinterpret_cast<HWND>(lParam), text, 64);
-            wchar_t* end = nullptr;
-            const long value = std::wcstol(text, &end, 10);
-            if (end != text) self->controller_.tweakMachineParameter(index,
-                static_cast<int32_t>(value));
-        }
-        return 0;
-    }
-
     if (self && self->originalWindowProc_) {
         return CallWindowProcW(
             self->originalWindowProc_,
@@ -374,6 +395,79 @@ LRESULT CALLBACK LoaderEditorView::windowProc(
         );
     }
     return DefWindowProcW(window, message, wParam, lParam);
+}
+
+LRESULT CALLBACK LoaderEditorView::parameterPanelProc(
+    HWND window,
+    UINT message,
+    WPARAM wParam,
+    LPARAM lParam
+) {
+    auto* self = reinterpret_cast<LoaderEditorView*>(
+        GetWindowLongPtrW(window, GWLP_USERDATA)
+    );
+    if (self && message == WM_VSCROLL) {
+        SCROLLINFO info {};
+        info.cbSize = sizeof(info);
+        info.fMask = SIF_TRACKPOS;
+        GetScrollInfo(window, SB_VERT, &info);
+        self->scrollParameters(LOWORD(wParam), info.nTrackPos);
+        return 0;
+    }
+    if (self && message == WM_MOUSEWHEEL) {
+        self->wheelRemainder_ += GET_WHEEL_DELTA_WPARAM(wParam);
+        while (self->wheelRemainder_ >= WHEEL_DELTA) {
+            self->scrollParameters(SB_LINEUP);
+            self->wheelRemainder_ -= WHEEL_DELTA;
+        }
+        while (self->wheelRemainder_ <= -WHEEL_DELTA) {
+            self->scrollParameters(SB_LINEDOWN);
+            self->wheelRemainder_ += WHEEL_DELTA;
+        }
+        return 0;
+    }
+    if (self && message == WM_HSCROLL && lParam) {
+        const int id = GetDlgCtrlID(reinterpret_cast<HWND>(lParam));
+        if (id >= kSliderControlBase &&
+            id < kSliderControlBase + static_cast<int>(self->parameterSliders_.size())) {
+            const auto index = static_cast<size_t>(id - kSliderControlBase);
+            const auto position = static_cast<int>(SendMessageW(
+                self->parameterSliders_[index], TBM_GETPOS, 0, 0
+            ));
+            self->setParameterValue(
+                index, sliderValue(self->parameters_[index], position), true
+            );
+        }
+        return 0;
+    }
+    if (self && !self->rebuildingControls_ && message == WM_COMMAND &&
+        HIWORD(wParam) == EN_KILLFOCUS &&
+        LOWORD(wParam) >= kParameterControlBase &&
+        LOWORD(wParam) < kParameterControlBase +
+                            static_cast<int>(self->parameterEdits_.size())) {
+        self->commitParameterEdit(
+            static_cast<size_t>(LOWORD(wParam) - kParameterControlBase)
+        );
+        return 0;
+    }
+    return self && self->originalPanelProc_
+        ? CallWindowProcW(self->originalPanelProc_, window, message, wParam, lParam)
+        : DefWindowProcW(window, message, wParam, lParam);
+}
+
+LRESULT CALLBACK LoaderEditorView::parameterChildProc(
+    HWND window, UINT message, WPARAM wParam, LPARAM lParam,
+    UINT_PTR id, DWORD_PTR data
+) {
+    auto* self = reinterpret_cast<LoaderEditorView*>(data);
+    if (message == WM_MOUSEWHEEL && self && self->parameterPanel_) {
+        SendMessageW(self->parameterPanel_, message, wParam, lParam);
+        return 0;
+    }
+    if (message == WM_NCDESTROY) {
+        RemoveWindowSubclass(window, parameterChildProc, id);
+    }
+    return DefSubclassProc(window, message, wParam, lParam);
 }
 
 void LoaderEditorView::createControls() {
@@ -449,6 +543,21 @@ void LoaderEditorView::createControls() {
         GetModuleHandleW(nullptr),
         nullptr
     );
+    parameterPanel_ = CreateWindowExW(
+        0, L"STATIC", L"",
+        WS_CHILD | WS_VISIBLE | SS_NOTIFY | WS_VSCROLL | WS_CLIPCHILDREN,
+        0, kPanelTop, kEditorWidth, kEditorHeight - kPanelTop,
+        container_, nullptr, GetModuleHandleW(nullptr), nullptr
+    );
+    if (parameterPanel_) {
+        SetWindowLongPtrW(
+            parameterPanel_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this)
+        );
+        originalPanelProc_ = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
+            parameterPanel_, GWLP_WNDPROC,
+            reinterpret_cast<LONG_PTR>(&LoaderEditorView::parameterPanelProc)
+        ));
+    }
 
     applyDefaultFont(title_);
     applyDefaultFont(description_);
@@ -467,11 +576,18 @@ void LoaderEditorView::createControls() {
 }
 
 void LoaderEditorView::rebuildParameterControls() {
+    rebuildingControls_ = true;
     for (auto control : parameterLabels_) DestroyWindow(control);
     for (auto control : parameterEdits_) DestroyWindow(control);
+    for (auto control : parameterSliders_) DestroyWindow(control);
     parameterLabels_.clear();
     parameterEdits_.clear();
+    parameterSliders_.clear();
     parameterScrollOffset_ = 0;
+    if (!parameterPanel_) {
+        rebuildingControls_ = false;
+        return;
+    }
     for (size_t index = 0;
          index < parameters_.size() &&
              index < kMaximumEditorParameters;
@@ -482,15 +598,25 @@ void LoaderEditorView::rebuildParameterControls() {
             std::to_string(parameters_[index].maximum) + "]";
         auto label = CreateWindowExW(
             0, L"STATIC", utf8ToWide(labelText).c_str(),
-            WS_CHILD | WS_VISIBLE, 20, 164, 300, 24, container_, nullptr,
+            WS_CHILD | WS_VISIBLE, 8, 0, 180, 24,
+            parameterPanel_, nullptr,
             GetModuleHandleW(nullptr), nullptr
         );
         auto edit = CreateWindowExW(
             WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-            330, 164, 90, 24, container_,
+            300, 0, 84, 24, parameterPanel_,
             reinterpret_cast<HMENU>(
                 static_cast<INT_PTR>(kParameterControlBase + index)
+            ),
+            GetModuleHandleW(nullptr), nullptr
+        );
+        auto slider = CreateWindowExW(
+            0, TRACKBAR_CLASSW, L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
+            190, 0, 104, 26, parameterPanel_,
+            reinterpret_cast<HMENU>(
+                static_cast<INT_PTR>(kSliderControlBase + index)
             ),
             GetModuleHandleW(nullptr), nullptr
         );
@@ -502,12 +628,73 @@ void LoaderEditorView::rebuildParameterControls() {
             static_cast<int>(parameters_[index].value)
         );
         SetWindowTextW(edit, value);
+        if (slider) {
+            SendMessageW(slider, TBM_SETRANGEMIN, FALSE, 0);
+            SendMessageW(slider, TBM_SETRANGEMAX, FALSE, kSliderSteps);
+            SendMessageW(
+                slider, TBM_SETPOS, TRUE,
+                sliderPosition(parameters_[index])
+            );
+        }
         applyDefaultFont(label);
         applyDefaultFont(edit);
+        applyDefaultFont(slider);
+        if (edit) {
+            SetWindowSubclass(
+                edit, parameterChildProc, 1, reinterpret_cast<DWORD_PTR>(this)
+            );
+        }
+        if (slider) {
+            SetWindowSubclass(
+                slider, parameterChildProc, 1, reinterpret_cast<DWORD_PTR>(this)
+            );
+        }
         parameterLabels_.push_back(label);
         parameterEdits_.push_back(edit);
+        parameterSliders_.push_back(slider);
     }
-    layoutControls(kEditorWidth, currentHeight_);
+    rebuildingControls_ = false;
+    layoutParameterPanel();
+}
+
+void LoaderEditorView::setParameterValue(
+    size_t index, int32_t value, bool sendTweak
+) {
+    if (index >= parameters_.size() || index >= parameterEdits_.size()) return;
+    auto& parameter = parameters_[index];
+    value = std::clamp(value, parameter.minimum, parameter.maximum);
+    const bool changed = value != parameter.value;
+    parameter.value = value;
+    wchar_t text[32] {};
+    swprintf_s(text, _countof(text), L"%d", static_cast<int>(value));
+    SetWindowTextW(parameterEdits_[index], text);
+    if (parameterSliders_[index]) {
+        SendMessageW(
+            parameterSliders_[index], TBM_SETPOS, TRUE,
+            sliderPosition(parameter)
+        );
+    }
+    if (sendTweak && changed) {
+        controller_.tweakMachineParameter(index, value);
+    }
+}
+
+void LoaderEditorView::commitParameterEdit(size_t index) {
+    if (index >= parameterEdits_.size()) return;
+    wchar_t text[64] {};
+    GetWindowTextW(parameterEdits_[index], text, _countof(text));
+    wchar_t* end = nullptr;
+    const auto parsed = std::wcstoll(text, &end, 10);
+    if (end != text && *end == L'\0') {
+        const auto safeValue = std::clamp(
+            parsed,
+            static_cast<long long>(std::numeric_limits<int32_t>::min()),
+            static_cast<long long>(std::numeric_limits<int32_t>::max())
+        );
+        setParameterValue(index, static_cast<int32_t>(safeValue), true);
+    } else {
+        setParameterValue(index, parameters_[index].value, false);
+    }
 }
 
 void LoaderEditorView::chooseMachine() {
@@ -561,28 +748,76 @@ void LoaderEditorView::layoutControls(int width, int height) {
     MoveWindow(title_, 20, 16, contentWidth, 22, TRUE);
     MoveWindow(description_, 20, 44, contentWidth, 20, TRUE);
     MoveWindow(status_, 20, 118, contentWidth, 36, TRUE);
-    for (size_t i = 0; i < parameterLabels_.size(); ++i) {
-        const int y =
-            164 + static_cast<int>(i) * 28 - parameterScrollOffset_;
-        MoveWindow(parameterLabels_[i], 20, y, 300, 24, TRUE);
-        MoveWindow(parameterEdits_[i], 330, y, 90, 24, TRUE);
+    if (parameterPanel_) {
+        MoveWindow(
+            parameterPanel_, 12, kPanelTop, std::max(1, width - 24),
+            std::max(1, height - kPanelTop - 8), TRUE
+        );
+        layoutParameterPanel();
     }
+}
+
+void LoaderEditorView::layoutParameterPanel() {
+    if (!parameterPanel_) return;
+    RECT bounds {};
+    GetClientRect(parameterPanel_, &bounds);
+    const int height = std::max(1, static_cast<int>(bounds.bottom - bounds.top));
     SCROLLINFO info {};
     info.cbSize = sizeof(info);
     info.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
     info.nMin = 0;
     info.nMax = std::max(
-        0,
-        164 + static_cast<int>(parameterLabels_.size()) * 28 - 1
+        0, static_cast<int>(parameterLabels_.size()) * kParameterRowHeight - 1
     );
-    info.nPage = static_cast<UINT>(std::max(1, height));
+    info.nPage = static_cast<UINT>(height);
     info.nPos = parameterScrollOffset_;
-    SetScrollInfo(container_, SB_VERT, &info, TRUE);
-    SCROLLINFO current {};
-    current.cbSize = sizeof(current);
-    current.fMask = SIF_POS;
-    GetScrollInfo(container_, SB_VERT, &current);
-    parameterScrollOffset_ = current.nPos;
+    SetScrollInfo(parameterPanel_, SB_VERT, &info, TRUE);
+    GetClientRect(parameterPanel_, &bounds);
+    const int width = static_cast<int>(bounds.right - bounds.left);
+    info.fMask = SIF_POS;
+    GetScrollInfo(parameterPanel_, SB_VERT, &info);
+    parameterScrollOffset_ = info.nPos;
+    const int editWidth = 84;
+    const int labelWidth = std::max(140, (width - editWidth - 24) * 45 / 100);
+    const int sliderX = 8 + labelWidth + 8;
+    const int editX = std::max(sliderX + 80, width - editWidth - 8);
+    for (size_t i = 0; i < parameterLabels_.size(); ++i) {
+        const int y = static_cast<int>(i) * kParameterRowHeight -
+                      parameterScrollOffset_;
+        MoveWindow(parameterLabels_[i], 8, y, labelWidth, 24, TRUE);
+        MoveWindow(
+            parameterSliders_[i], sliderX, y,
+            std::max(80, editX - sliderX - 8), 26, TRUE
+        );
+        MoveWindow(parameterEdits_[i], editX, y, editWidth, 24, TRUE);
+    }
+}
+
+void LoaderEditorView::scrollParameters(
+    int command, int trackPosition
+) {
+    if (!parameterPanel_) return;
+    SCROLLINFO info {};
+    info.cbSize = sizeof(info);
+    info.fMask = SIF_ALL;
+    GetScrollInfo(parameterPanel_, SB_VERT, &info);
+    int position = info.nPos;
+    switch (command) {
+    case SB_LINEUP: position -= kParameterRowHeight; break;
+    case SB_LINEDOWN: position += kParameterRowHeight; break;
+    case SB_PAGEUP: position -= static_cast<int>(info.nPage); break;
+    case SB_PAGEDOWN: position += static_cast<int>(info.nPage); break;
+    case SB_THUMBPOSITION:
+    case SB_THUMBTRACK: position = trackPosition; break;
+    case SB_TOP: position = info.nMin; break;
+    case SB_BOTTOM: position = info.nMax; break;
+    default: return;
+    }
+    parameterScrollOffset_ = std::clamp(
+        position, 0,
+        std::max(0, info.nMax - static_cast<int>(info.nPage) + 1)
+    );
+    layoutParameterPanel();
 }
 
 void LoaderEditorView::destroyControls() {
@@ -590,6 +825,14 @@ void LoaderEditorView::destroyControls() {
         return;
     }
 
+    if (parameterPanel_ && originalPanelProc_) {
+        SetWindowLongPtrW(
+            parameterPanel_, GWLP_WNDPROC,
+            reinterpret_cast<LONG_PTR>(originalPanelProc_)
+        );
+        SetWindowLongPtrW(parameterPanel_, GWLP_USERDATA, 0);
+        originalPanelProc_ = nullptr;
+    }
     if (originalWindowProc_) {
         SetWindowLongPtrW(
             container_,
@@ -601,6 +844,7 @@ void LoaderEditorView::destroyControls() {
     SetWindowLongPtrW(container_, GWLP_USERDATA, 0);
     DestroyWindow(container_);
     container_ = nullptr;
+    parameterPanel_ = nullptr;
     title_ = nullptr;
     description_ = nullptr;
     pathEdit_ = nullptr;
@@ -608,6 +852,7 @@ void LoaderEditorView::destroyControls() {
     status_ = nullptr;
     parameterLabels_.clear();
     parameterEdits_.clear();
+    parameterSliders_.clear();
 }
 #endif
 
