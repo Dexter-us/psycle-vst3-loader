@@ -73,6 +73,7 @@ private:
 
     HWND container_ = nullptr;
     HWND parameterPanel_ = nullptr;
+    HWND parameterScrollbar_ = nullptr;
     HWND title_ = nullptr;
     HWND description_ = nullptr;
     HWND pathEdit_ = nullptr;
