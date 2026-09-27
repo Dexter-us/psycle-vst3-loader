@@ -65,6 +65,7 @@ private:
     void commitParameterEdit(size_t index);
     void setParameterValue(size_t index, int32_t value, bool sendTweak);
     void chooseMachine();
+    void requestLargerView();
     void layoutControls(int width, int height);
     void layoutParameterPanel();
     void scrollParameters(int command, int trackPosition = 0);
@@ -76,6 +77,7 @@ private:
     HWND description_ = nullptr;
     HWND pathEdit_ = nullptr;
     HWND browseButton_ = nullptr;
+    HWND resizeButton_ = nullptr;
     HWND status_ = nullptr;
     std::vector<HWND> parameterLabels_;
     std::vector<HWND> parameterEdits_;
