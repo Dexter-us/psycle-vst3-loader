@@ -2,6 +2,8 @@
 
 #include "public.sdk/source/vst/vsteditcontroller.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <vector>

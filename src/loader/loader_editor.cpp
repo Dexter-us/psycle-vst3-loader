@@ -1,15 +1,19 @@
 #include "loader_editor.h"
 
 #include "loader_controller.h"
+#include "loader_messages.h"
 
 #include "pluginterfaces/gui/iplugview.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
+#include <utility>
 
 #if defined(_WIN32)
 #include <commdlg.h>
+#include <windowsx.h>
 #include <string_view>
 #include <vector>
 #endif
@@ -299,7 +303,9 @@ LRESULT CALLBACK LoaderEditorView::windowProc(
     }
 
     if (self && message == WM_VSCROLL) {
-        SCROLLINFO info {sizeof(info), SIF_ALL};
+        SCROLLINFO info {};
+        info.cbSize = sizeof(info);
+        info.fMask = SIF_ALL;
         GetScrollInfo(window, SB_VERT, &info);
         int position = info.nPos;
         switch (LOWORD(wParam)) {
@@ -318,8 +324,8 @@ LRESULT CALLBACK LoaderEditorView::windowProc(
         RECT bounds {};
         GetClientRect(window, &bounds);
         self->layoutControls(
-            std::max(1L, bounds.right - bounds.left),
-            std::max(1L, bounds.bottom - bounds.top)
+            std::max(1, static_cast<int>(bounds.right - bounds.left)),
+            std::max(1, static_cast<int>(bounds.bottom - bounds.top))
         );
         return 0;
     }
@@ -489,7 +495,12 @@ void LoaderEditorView::rebuildParameterControls() {
             GetModuleHandleW(nullptr), nullptr
         );
         wchar_t value[32] {};
-        swprintf_s(value, L"%d", parameters_[index].value);
+        swprintf_s(
+            value,
+            _countof(value),
+            L"%d",
+            static_cast<int>(parameters_[index].value)
+        );
         SetWindowTextW(edit, value);
         applyDefaultFont(label);
         applyDefaultFont(edit);
@@ -556,7 +567,9 @@ void LoaderEditorView::layoutControls(int width, int height) {
         MoveWindow(parameterLabels_[i], 20, y, 300, 24, TRUE);
         MoveWindow(parameterEdits_[i], 330, y, 90, 24, TRUE);
     }
-    SCROLLINFO info {sizeof(info), SIF_RANGE | SIF_PAGE | SIF_POS};
+    SCROLLINFO info {};
+    info.cbSize = sizeof(info);
+    info.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
     info.nMin = 0;
     info.nMax = std::max(
         0,
@@ -565,7 +578,9 @@ void LoaderEditorView::layoutControls(int width, int height) {
     info.nPage = static_cast<UINT>(std::max(1, height));
     info.nPos = parameterScrollOffset_;
     SetScrollInfo(container_, SB_VERT, &info, TRUE);
-    SCROLLINFO current {sizeof(current), SIF_POS};
+    SCROLLINFO current {};
+    current.cbSize = sizeof(current);
+    current.fMask = SIF_POS;
     GetScrollInfo(container_, SB_VERT, &current);
     parameterScrollOffset_ = current.nPos;
 }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 namespace psycle::loader {
 
 inline constexpr char kMachinePathMessageId[] = "PsycleMachinePath";
@@ -11,6 +13,6 @@ inline constexpr char kMachineParametersMessageId[] = "PsycleMachineParameters";
 inline constexpr char kMachineParametersAttributeId[] = "Parameters";
 inline constexpr char kMachineTweakMessageId[] = "PsycleMachineTweak";
 inline constexpr char kMachineTweakAttributeId[] = "Tweak";
-inline constexpr uint32_t kMaximumEditorParameters = 256;
+inline constexpr std::uint32_t kMaximumEditorParameters = 256;
 
 } // namespace psycle::loader
