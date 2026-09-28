@@ -63,6 +63,10 @@ private:
     std::atomic<PsycleMachineLoader*> publishedMachine_ {nullptr};
     std::atomic<PsycleMachineLoader*> audioHazard_ {nullptr};
     std::string nativeStatePath_;
+    // Immutable metadata/value snapshot captured before audio publication.
+    std::vector<MachineParameterSnapshot> editorParameters_;
+    std::string editorMachineName_;
+    bool editorSnapshotReady_ = false;
     std::vector<int32_t> savedMachineParameters_;
     std::vector<uint8_t> savedMachineData_;
     struct PendingTweak { uint64_t generation; int32_t index; int32_t value; };

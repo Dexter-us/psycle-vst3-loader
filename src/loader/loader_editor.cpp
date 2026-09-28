@@ -215,6 +215,7 @@ tresult PLUGIN_API LoaderEditorView::attached(void* parent, FIDString type) {
     createControls();
     layoutControls(getRect().getWidth(), getRect().getHeight());
     controller_.registerEditor(this);
+    SetTimer(container_, 1, 1000, nullptr);
     RedrawWindow(
         container_, nullptr, nullptr,
         RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW
@@ -350,6 +351,10 @@ LRESULT CALLBACK LoaderEditorView::windowProc(
         GetWindowLongPtrW(window, GWLP_USERDATA)
     );
 
+    if (self && message == WM_TIMER && wParam == 1) {
+        self->controller_.refreshMachineState();
+        return 0;
+    }
     if (self && message == kUiUpdateMessage) {
         std::wstring path;
         std::wstring status;
@@ -934,6 +939,7 @@ void LoaderEditorView::destroyControls() {
         return;
     }
 
+    KillTimer(container_, 1);
     if (parameterPanel_ && originalPanelProc_) {
         SetWindowLongPtrW(
             parameterPanel_, GWLP_WNDPROC,

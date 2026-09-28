@@ -270,6 +270,22 @@ tresult PLUGIN_API LoaderProcessor::notify(IMessage* message) {
     if (!message) {
         return AudioEffect::notify(message);
     }
+    if (FIDStringsEqual(message->getMessageID(), kMachineEditorRefreshMessageId)) {
+        std::vector<MachineParameterSnapshot> parameters;
+        std::string name;
+        uint64_t generation = 0;
+        {
+            std::lock_guard<std::mutex> lock(ownershipMutex_);
+            if (!active_.load() || !editorSnapshotReady_) return kResultOk;
+            parameters = editorParameters_;
+            name = editorMachineName_;
+            generation = machineGeneration_.load();
+        }
+        // Reply from the UI's request, not from inside host activation.
+        // Never read Vals or call into the live native machine here.
+        sendMachineStatus(true, name);
+        return sendMachineParameters(parameters, generation) ? kResultOk : kResultFalse;
+    }
     if (FIDStringsEqual(message->getMessageID(), kMachineTweakMessageId)) {
         const void* raw = nullptr; uint32 size = 0;
         auto* attrs = message->getAttributes();
@@ -323,6 +339,7 @@ tresult PLUGIN_API LoaderProcessor::notify(IMessage* message) {
         {
             std::lock_guard<std::mutex> lock(ownershipMutex_);
             machinePath_ = requestedPath;
+            editorSnapshotReady_ = false;
         }
         sendMachineStatus(
             true,
@@ -465,6 +482,11 @@ bool LoaderProcessor::loadMachinePath(const std::string& path) {
                 replacement->setGeneration(publishedGeneration);
                 machine_ = std::move(replacement);
                 machinePath_ = path;
+                editorParameters_ = parameterSnapshot;
+                editorMachineName_ = stateRestored
+                    ? loadedName
+                    : loadedName + " (saved machine data could not be restored)";
+                editorSnapshotReady_ = true;
                 publishedMachine_.store(
                     machine_.get(),
                     std::memory_order_seq_cst

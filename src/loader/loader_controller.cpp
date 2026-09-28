@@ -90,6 +90,7 @@ tresult PLUGIN_API LoaderController::notify(IMessage* message) {
             }
             parameters_ = parsed;
             machineGeneration_ = generation;
+            waitingForParameters_ = false;
         }
         std::lock_guard<std::mutex> editorLock(editorsMutex_);
         {
@@ -148,11 +149,14 @@ tresult PLUGIN_API LoaderController::notify(IMessage* message) {
             // machine's controls while waiting for its new parameter list.
             machineGeneration_ = 0;
             parameters_.clear();
+            waitingForParameters_ = true;
             activePath = machinePath_;
         }
         setDirty(true);
     } else {
         activePath = machinePath();
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        waitingForParameters_ = false;
     }
 
     {
@@ -179,6 +183,10 @@ IPlugView* PLUGIN_API LoaderController::createView(FIDString name) {
 }
 
 void LoaderController::selectMachinePath(const std::string& path) {
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        waitingForParameters_ = true;
+    }
     IMessage* message = allocateMessage();
     if (!message) {
         {
@@ -240,6 +248,18 @@ void LoaderController::tweakMachineParameter(size_t index, int32_t value) {
         tweak {generation, static_cast<int32_t>(index), value};
     message->getAttributes()->setBinary(
         kMachineTweakAttributeId, &tweak, static_cast<uint32>(sizeof(tweak)));
+    sendMessage(message);
+    message->release();
+}
+
+void LoaderController::refreshMachineState() {
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        if (!waitingForParameters_) return;
+    }
+    auto* message = allocateMessage();
+    if (!message) return;
+    message->setMessageID(kMachineEditorRefreshMessageId);
     sendMessage(message);
     message->release();
 }
