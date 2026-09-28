@@ -493,11 +493,16 @@ bool LoaderProcessor::loadMachinePath(const std::string& path) {
             ? loadedName
             : loadedName + " (saved machine data could not be restored)"
     );
-    sendMachineParameters(parameterSnapshot, publishedGeneration);
+    if (!sendMachineParameters(parameterSnapshot, publishedGeneration)) {
+        sendMachineStatus(
+            true,
+            loadedName + " (audio loaded; parameter controls could not be delivered)"
+        );
+    }
     return true;
 }
 
-void LoaderProcessor::sendMachineParameters(
+bool LoaderProcessor::sendMachineParameters(
     const std::vector<MachineParameterSnapshot>& parameters,
     uint64_t generation
 ) {
@@ -526,14 +531,16 @@ void LoaderProcessor::sendMachineParameters(
         append(&parameter.value, sizeof(parameter.value));
     }
     IMessage* message = allocateMessage();
-    if (!message) return;
+    if (!message) return false;
     message->setMessageID(kMachineParametersMessageId);
-    if (message->getAttributes()->setBinary(
+    auto* attributes = message->getAttributes();
+    const bool delivered = attributes &&
+        attributes->setBinary(
             kMachineParametersAttributeId, payload.data(),
-            static_cast<uint32>(payload.size())) == kResultOk) {
-        sendMessage(message);
-    }
+            static_cast<uint32>(payload.size())) == kResultOk &&
+        sendMessage(message) == kResultOk;
     message->release();
+    return delivered;
 }
 
 void LoaderProcessor::applyPendingTweaks(
