@@ -143,6 +143,11 @@ tresult PLUGIN_API LoaderController::notify(IMessage* message) {
         {
             std::lock_guard<std::mutex> lock(stateMutex_);
             machinePath_ = pathString.text8();
+            // The host may reconnect this controller to a fresh processor
+            // whose generation starts at one. Do not keep the previous
+            // machine's controls while waiting for its new parameter list.
+            machineGeneration_ = 0;
+            parameters_.clear();
             activePath = machinePath_;
         }
         setDirty(true);
@@ -157,6 +162,9 @@ tresult PLUGIN_API LoaderController::notify(IMessage* message) {
                 continue;
             }
             editor->updateMachinePath(activePath);
+            if (success) {
+                editor->updateParameters({});
+            }
             editor->updateStatus(statusString.text8(), success);
         }
     }
