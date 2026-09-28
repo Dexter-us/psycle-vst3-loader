@@ -242,24 +242,39 @@ void LoaderController::tweakMachineParameter(size_t index, int32_t value) {
     IMessage* message = allocateMessage();
     if (!message) return;
     message->setMessageID(kMachineTweakMessageId);
-    // The processor validates the index/value; use a compact, generation-neutral
-    // payload for compatibility with hosts that replay editor messages.
+    // Generation protects against edits targeting a replaced machine.
     struct Tweak { uint64_t generation; int32_t index; int32_t value; }
         tweak {generation, static_cast<int32_t>(index), value};
     message->getAttributes()->setBinary(
         kMachineTweakAttributeId, &tweak, static_cast<uint32>(sizeof(tweak)));
-    sendMessage(message);
+    const auto result = sendMessage(message);
     message->release();
+    if (result == kResultOk) {
+        setDirty(true);
+    } else {
+        {
+            std::lock_guard<std::mutex> lock(stateMutex_);
+            waitingForParameters_ = true;
+        }
+        std::lock_guard<std::mutex> lock(editorsMutex_);
+        for (auto* editor : editors_) {
+            if (editor) editor->updateStatus(
+                "Parameter change was not accepted. Refreshing controls; try again.", false);
+        }
+    }
 }
 
 void LoaderController::refreshMachineState() {
+    int64 knownGeneration = -1;
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
-        if (!waitingForParameters_) return;
+        if (!waitingForParameters_) knownGeneration = static_cast<int64>(machineGeneration_);
     }
     auto* message = allocateMessage();
     if (!message) return;
     message->setMessageID(kMachineEditorRefreshMessageId);
+    if (message->getAttributes())
+        message->getAttributes()->setInt("KnownGeneration", knownGeneration);
     sendMessage(message);
     message->release();
 }

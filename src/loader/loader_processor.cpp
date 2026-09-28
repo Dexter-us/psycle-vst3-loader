@@ -276,7 +276,11 @@ tresult PLUGIN_API LoaderProcessor::notify(IMessage* message) {
         uint64_t generation = 0;
         {
             std::lock_guard<std::mutex> lock(ownershipMutex_);
-            if (!active_.load() || !editorSnapshotReady_) return kResultOk;
+            if (!editorSnapshotReady_) return kResultOk;
+            int64 knownGeneration = -1;
+            if (message->getAttributes() &&
+                message->getAttributes()->getInt("KnownGeneration", knownGeneration) == kResultOk &&
+                knownGeneration == static_cast<int64>(machineGeneration_.load())) return kResultOk;
             parameters = editorParameters_;
             name = editorMachineName_;
             generation = machineGeneration_.load();
@@ -300,6 +304,18 @@ tresult PLUGIN_API LoaderProcessor::notify(IMessage* message) {
         if (generation != machineGeneration_.load(std::memory_order_acquire)) {
             return kResultFalse;
         }
+        if (!editorSnapshotReady_ || index < 0 ||
+            static_cast<size_t>(index) >= editorParameters_.size()) return kResultFalse;
+        auto& parameter = editorParameters_[index];
+        value = std::clamp(value, parameter.minimum, parameter.maximum);
+        if (!active_.load()) {
+            // No native instance is running. Preserve edits for the next activation.
+            parameter.value = value;
+            savedMachineParameters_.clear();
+            for (const auto& p : editorParameters_) savedMachineParameters_.push_back(p.value);
+            nativeStatePath_ = machinePath_;
+            return kResultOk;
+        }
         const auto writeIndex = tweakWriteIndex_.load(
             std::memory_order_relaxed
         );
@@ -309,6 +325,7 @@ tresult PLUGIN_API LoaderProcessor::notify(IMessage* message) {
         if (writeIndex - readIndex >= kTweakQueueCapacity) {
             return kResultFalse;
         }
+        parameter.value = value;
         pendingTweaks_[writeIndex % kTweakQueueCapacity] = {
             generation,
             index,
@@ -663,6 +680,17 @@ void LoaderProcessor::stopAndReleaseMachines() {
     }
 
     std::lock_guard<std::mutex> lock(ownershipMutex_);
+    if (machine_ && machine_->isLoaded()) {
+        // Audio has released its reference; native state can now be captured safely.
+        applyPendingTweaks(*machine_);
+        std::vector<int32_t> parameters;
+        std::vector<uint8_t> data;
+        if (machine_->captureState(parameters, data)) {
+            nativeStatePath_ = machinePath_;
+            savedMachineParameters_ = std::move(parameters);
+            savedMachineData_ = std::move(data);
+        }
+    }
     machine_.reset();
     retiredMachines_.clear();
 }
