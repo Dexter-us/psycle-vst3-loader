@@ -75,7 +75,7 @@ private:
     void loadSelectedMachine();
     bool loadMachinePath(const std::string& path);
     void sendMachineStatus(bool success, const std::string& status);
-    void sendMachineParameters(
+    bool sendMachineParameters(
         const std::vector<MachineParameterSnapshot>& parameters,
         uint64_t generation
     );
